@@ -47,9 +47,12 @@ function grantAskReason(detail) {
 }
 
 function allowReason(consumed) {
-  const by = consumed.map(c => `${c.action} under ${c.id} (${c.scope}, issued ${c.issued})`).join('; ')
-  return `Pre-authorized by the human (Agentic SDLC grant): ${by}. The grant is spent now — ` +
-    'if the command fails, re-grant.'
+  const by = consumed.map(c => `${c.action} under ${c.id} (${c.scope}, ${c.mode}, issued ${c.issued})`).join('; ')
+  const once = consumed.some(c => c.mode === 'once')
+  const tail = once
+    ? 'A once-grant is spent now — if the command fails, re-grant.'
+    : 'The standing grant stays active until revoked, reopened or the cycle ends.'
+  return `Pre-authorized by the human (Agentic SDLC grant): ${by}. ${tail}`
 }
 
 function denyReason(what) {
@@ -143,7 +146,7 @@ function checkBashPublish(command, ctx) {
     const c = consumeGrant(content, { id: m.grant.id, action: op.action, date })
     if (!c) return ask(`${op.matched}: ${m.grant.id} could not be spent.`)
     content = c.content
-    consumed.push({ id: m.grant.id, action: op.action, scope: m.grant.scope, issued: m.grant.issued })
+    consumed.push({ id: m.grant.id, action: op.action, scope: m.grant.scope, mode: m.grant.mode, issued: m.grant.issued })
   }
   return { decision: 'allow', reason: allowReason(consumed), consumed: consumed.map(c => ({ id: c.id, action: c.action })), content }
 }
