@@ -141,3 +141,126 @@ test('CLI: unparseable stdin fails open — exit 0, no output', () => {
   assert.equal(r.status, 0)
   assert.equal(r.stdout, '')
 })
+
+// --- Git grants: a human-issued, scoped, gate-bound pre-authorization turns the "ask"
+// into an "allow" — and is consumed on the spot (fail closed: a failed command spends it).
+
+import { initMetadata, parseMetadata, issueGrant, recordGateVerdict, revokeGrants } from '../scripts/sdlc-state.mjs'
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+
+const TEMPLATE = readFileSync(fileURLToPath(new URL('../templates/sdlc-metadata.yml', import.meta.url)), 'utf8')
+const D = '2026-10-31'
+function meta({ actions = ['commit'], scope = 'phase:develop', mode = 'once', verdicts = ['develop code_reviewer PASS'] } = {}) {
+  let y = initMetadata(TEMPLATE, { name: 'x', version: '0.1.0', mode: 'existing' })
+  y = issueGrant(y, { actions, scope, mode, date: D }).content
+  for (const v of verdicts) {
+    const [phase, gate, verdict] = v.split(' ')
+    y = recordGateVerdict(y, { phase, gate, verdict, date: D }).content
+  }
+  return y
+}
+const grantOf = (content, id = 'G-001') => parseMetadata(content).runtime.grants.find(g => g.id === id)
+
+test('guard allows git commit under a matching grant and consumes it in the same decision', () => {
+  const d = decide(bash('git commit -m "feat: x"'), { metadataContent: meta(), date: D })
+  assert.equal(d.decision, 'allow')
+  assert.match(d.reason, /G-001/)
+  assert.match(d.reason, /phase:develop/)
+  assert.deepEqual(d.consumed, [{ id: 'G-001', action: 'commit' }])
+  const g = grantOf(d.content)
+  assert.equal(g.status, 'consumed') // once + single action → spent
+  assert.deepEqual(g.used, ['commit'])
+  // the same command again: the grant is spent → back to the human gate
+  const again = decide(bash('git commit -m "feat: y"'), { metadataContent: d.content, date: D })
+  assert.equal(again.decision, 'ask')
+})
+
+test('guard allows a commit && push chain only when the grant carries both actions', () => {
+  const commitOnly = decide(bash('git commit -m x && git push origin main'), { metadataContent: meta(), date: D })
+  assert.equal(commitOnly.decision, 'ask')
+  assert.match(commitOnly.reason, /push/)
+  assert.equal(commitOnly.content, undefined) // nothing consumed on an ask
+  const both = decide(bash('git commit -m x && git push origin main'), { metadataContent: meta({ actions: ['commit', 'push'] }), date: D })
+  assert.equal(both.decision, 'allow')
+  assert.deepEqual(both.consumed, [{ id: 'G-001', action: 'commit' }, { id: 'G-001', action: 'push' }])
+  assert.equal(grantOf(both.content).status, 'consumed')
+})
+
+test('guard allows git tag under a tag grant; bare git tag -l stays silent', () => {
+  const y = meta({ actions: ['tag'] })
+  assert.equal(decide(bash('git tag -a v1.0.0 -m v1.0.0'), { metadataContent: y, date: D }).decision, 'allow')
+  assert.equal(decide(bash('git tag -l'), { metadataContent: y, date: D }), null)
+})
+
+test('a standing grant allows repeatedly and stays active', () => {
+  const y = meta({ scope: 'cycle', mode: 'standing' })
+  const a = decide(bash('git commit -m a'), { metadataContent: y, date: D })
+  assert.equal(a.decision, 'allow')
+  const b = decide(bash('git commit -m b'), { metadataContent: a.content, date: D })
+  assert.equal(b.decision, 'allow')
+  assert.equal(grantOf(b.content).status, 'active')
+})
+
+test('guard falls back to ask when the grant\'s gate binding does not hold, naming the gap', () => {
+  const failed = decide(bash('git commit -m x'), { metadataContent: meta({ verdicts: ['develop code_reviewer FAIL'] }), date: D })
+  assert.equal(failed.decision, 'ask')
+  assert.match(failed.reason, /FAIL/)
+  assert.match(failed.reason, /G-001/)
+  const none = decide(bash('git commit -m x'), { metadataContent: meta({ verdicts: [] }), date: D })
+  assert.equal(none.decision, 'ask')
+  assert.match(none.reason, /no gate verdict/i)
+})
+
+test('guard asks when no grant applies, is revoked, metadata is absent, or metadata is garbage', () => {
+  const wrongAction = decide(bash('git push'), { metadataContent: meta(), date: D })
+  assert.equal(wrongAction.decision, 'ask')
+  let y = meta()
+  y = revokeGrants(y, { id: 'G-001', date: D }).content
+  assert.equal(decide(bash('git commit -m x'), { metadataContent: y, date: D }).decision, 'ask')
+  assert.equal(decide(bash('git commit -m x')).decision, 'ask') // 0.4.1 behaviour, no ctx at all
+  assert.equal(decide(bash('git commit -m x'), { metadataContent: 'nope: [' , date: D }).decision, 'ask')
+})
+
+test('publish is never grantable: npm publish / gh release create still ask under any grant', () => {
+  const y = meta({ actions: ['commit', 'push', 'tag'], scope: 'cycle', mode: 'standing' })
+  assert.equal(decide(bash('npm publish'), { metadataContent: y, date: D }).decision, 'ask')
+  assert.equal(decide(bash('gh release create v1.0.0 --notes x'), { metadataContent: y, date: D }).decision, 'ask')
+  // and a chain mixing a grantable op with a publish is an ask as a whole (nothing consumed)
+  const mixed = decide(bash('git push && npm publish'), { metadataContent: y, date: D })
+  assert.equal(mixed.decision, 'ask')
+  assert.equal(mixed.content, undefined)
+})
+
+test('issuing a grant is itself the human gate: `sdlc-state.mjs grant` asks; revoke/grants stay silent', () => {
+  for (const cmd of [
+    'node /p/scripts/sdlc-state.mjs grant --actions commit --scope phase:release',
+    'cd repo && node "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc-state.mjs" grant --actions commit,push --scope cycle --mode standing',
+  ]) {
+    const d = decide(bash(cmd), { metadataContent: meta(), date: D })
+    assert.equal(d?.decision, 'ask', `${cmd}: expected ask`)
+    assert.match(d.reason, /human gate/i)
+    assert.match(d.reason, /commit/)
+  }
+  assert.equal(decide(bash('node /p/scripts/sdlc-state.mjs revoke --all')), null)
+  assert.equal(decide(bash('node /p/scripts/sdlc-state.mjs revoke --id G-001 --reason done')), null)
+  assert.equal(decide(bash('node /p/scripts/sdlc-state.mjs grants')), null)
+  assert.equal(decide(bash('node /p/scripts/sdlc-state.mjs complete --phase develop')), null)
+})
+
+test('CLI: an allow is emitted as hookSpecificOutput JSON and the consumed grant is written back', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sdlc-guard-'))
+  const path = join(dir, 'docs/requirements/sdlc-metadata.yml')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, meta())
+  const input = { ...bash('git commit -m x'), cwd: dir }
+  const r = runGuard(input)
+  assert.equal(r.status, 0)
+  const out = JSON.parse(r.stdout)
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'allow')
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /G-001/)
+  assert.equal(grantOf(readFileSync(path, 'utf8')).status, 'consumed')
+  const r2 = runGuard(input)
+  assert.equal(JSON.parse(r2.stdout).hookSpecificOutput.permissionDecision, 'ask')
+})
