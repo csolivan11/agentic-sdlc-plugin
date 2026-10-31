@@ -10,6 +10,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-31
+
+### Added
+- **Git grants — pre-authorized commit / push / tag.** A human can now move the git gate
+  (invariant 4) *earlier in time* so an IV&V run, a QA cycle or a census completes without
+  babysitting the Allow button. `sdlc-state.mjs grant --actions commit[,push[,tag]] --scope
+  <cycle | phase:<p> | step:<p>/<agent> | task:PLAN-NNN> [--mode once|standing]` issues a
+  scoped, revocable grant (`grants` lists, `revoke --id|--all` revokes); issuing is itself
+  the one permission prompt. Grants live in the script-owned `runtime.grants` block and are
+  **bound to evidence**: `sdlc-guard.mjs` allows a covered `git commit`/`push`/`tag` only
+  when the scope's latest `gate_log` verdict is PASS/WAIVED (task scope also requires the
+  active plan to match), spends the grant at allow time (fail-closed), and logs every
+  ISSUED / USED / REVOKED / EXPIRED event to `gate_log`. `reopen` revokes the grants that
+  covered the reopened work; `cycle` expires all of them. The orchestrator — never a
+  subagent — commits at a covered completion with an `SDLC-Grant: G-NNN` trailer
+  (`references/grants.md`, loaded lazily); every playbook's completion is now
+  grant-conditional; first-time setup offers a one-time "pre-authorize commits?" pick that
+  issues a standing cycle-wide grant; the status board shows a `🔑 Grants:` line. Never
+  grantable: `npm publish`, `gh release`, and any `HUMAN_CHECKPOINT` /
+  `HUMAN_REVIEW_REQUIRED` decision.
+
+### Changed
+- Invariant 4 is restated as "git stays **human-authorized**" (the human still authorizes
+  every commit; a grant only changes *when*). The guard's reason strings name the state
+  script's `grant` / `grants` / `revoke` subcommands.
+- Structure tests pin the grant wiring (`references/grants.md`, the orchestrator's
+  `grant` / `revoke` / `🔑 Grants` / `SDLC-Grant:` mentions, every playbook's
+  grant-conditional completion, and that **no agent file** mentions `SDLC-Grant`).
+
 ## [0.4.1] — 2026-08-15
 
 ### Changed

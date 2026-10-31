@@ -15,7 +15,7 @@ state, `scripts/sdlc-guard.mjs`, the PreToolUse hook guard wired up by `hooks/ho
 and the agent eval harness under `evals/`. Tests use the built-in `node:test` runner.
 
 ```bash
-node --test            # must stay green (161 tests: state logic + hook guard + evals lib + plugin structure)
+node --test            # must stay green (189 tests: state logic + hook guard + evals lib + plugin structure)
 claude --plugin-dir .  # load the plugin into a Claude Code session
 /reload-plugins        # after edits, inside the session
 ```
@@ -28,11 +28,13 @@ The authoritative list (with rationale) is in [CLAUDE.md](CLAUDE.md); in brief:
 1. **Reviewer ≠ author.** Review agents are read-only (`Read Grep Glob Bash`); only authors get
    `Write Edit`. Never give a reviewer write tools.
 2. **Deterministic state.** Every `sdlc-metadata.yml` mutation goes through `sdlc-state.mjs`
-   (`init` / `complete` / `config`) — never an LLM hand-edit of YAML.
+   (`init` / `complete` / `config` / … / `grant` / `revoke`) — never an LLM hand-edit of YAML.
 3. **Exercise the real artifact.** Gates run the actual production build and confirm tests truly
    executed (0 suites collected = FAIL).
-4. **Git stays human-gated.** Agents stage and suggest commits/tags; they never commit, tag,
-   push, or publish.
+4. **Git stays human-authorized.** Agents stage and suggest commits/tags; they never commit,
+   tag, push, or publish. A human may pre-authorize a commit (and push/tag) with a scoped,
+   gate-bound, revocable **git grant** (`references/grants.md`); then only the orchestrator
+   commits, under the `SDLC-Grant:` trailer. Publishing is never grantable.
 5. **Don't yak-shave the target.** Pre-existing toolchain rot is a gate finding routed back, not
    something agents fix in the target repo.
 6. **Proportionate ceremony.** Feature-intake tiers changes trivial/standard/complex (with hard

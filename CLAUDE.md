@@ -22,7 +22,7 @@ accumulates the evidence.
 |------|------|
 | `.claude-plugin/` | Plugin manifest + marketplace entry |
 | `commands/sdlc.md` | The `/sdlc` wizard (orchestrator entry point) |
-| `references/` | Lazily-loaded protocol detail (setup, escalation, checkpoints, model routing) — the orchestrator reads each ONLY at its trigger, to keep the always-loaded context small |
+| `references/` | Lazily-loaded protocol detail (setup, escalation, checkpoints, model routing, git grants) — the orchestrator reads each ONLY at its trigger, to keep the always-loaded context small |
 | `agents/` | The 35 subagents (one `.md` each), grouped by phase: `sdlc-<phase>-<role>.md` |
 | `phases/` | 7 machine-readable phase playbooks (groups, modes, gates, post_phase) |
 | `skills/` | `sdlc-conventions` (read hygiene, shared rules) + `sdlc-feature-intake` (change tiering) |
@@ -35,7 +35,7 @@ accumulates the evidence.
 ## Build / test / run
 
 ```bash
-node --test                      # run all tests (currently 161, must stay green; model-free)
+node --test                      # run all tests (currently 189, must stay green; model-free)
 node evals/run.mjs --list        # list the agent evals (free)
 SDLC_EVALS=1 node evals/run.mjs  # run the agent evals headless — BILLED (real model calls)
 claude --plugin-dir .            # load the plugin into a Claude Code session for live use
@@ -57,9 +57,10 @@ them as constraints, not suggestions; the rationale is recorded in the git histo
 2. **Deterministic state.** Every `sdlc-metadata.yml` mutation goes through
    `scripts/sdlc-state.mjs` (`init` / `complete` / `config` / `brief` / `counts` /
    `plan-add` / `cycle` / `gate-log` / `plan-active` / `clarifier-round` / `loop-reset` /
-   `reopen`) — never an LLM hand-edit of YAML. That includes the **persisted loop state**
-   (the script-owned `runtime:` block: gate strike counters, clarifier rounds, the active
-   plan, the gate-verdict log), so the 3-strike bounds and the Verify cycle survive
+   `reopen` / `grant` / `grants` / `revoke`) — never an LLM hand-edit of YAML. That includes
+   the **persisted loop state** (the script-owned `runtime:` block: gate strike counters,
+   clarifier rounds, the active plan, the gate-verdict log, the git grants), so the 3-strike
+   bounds and the Verify cycle survive
    interruption instead of living in conversation memory — and the **route-back
    transitions**: a later gate's REWORK reopens the earlier phase via `reopen` (phase →
    in_progress, only the responsible agents → pending, loop bounds untouched), so resume
@@ -75,11 +76,21 @@ them as constraints, not suggestions; the rationale is recorded in the git histo
    execution evidence** (exact command, exit code, the runner's own summary lines), and the
    Verify release gate independently re-runs the test suite once (condition d2) rather than
    trusting self-reported counts.
-4. **Git stays human-gated.** Agents **stage + suggest** commits/tags; they do not commit,
-   tag, push, or publish. (Develop + Release.) Enforced deterministically by the same hook:
-   `git commit`/`tag`/`push`, `gh release`, `npm publish` become an explicit permission
+4. **Git stays human-authorized.** Agents **stage + suggest** commits/tags; they never
+   commit, tag, push, or publish. (Develop + Release.) Enforced deterministically by the same
+   hook: `git commit`/`tag`/`push`, `gh release`, `npm publish` become an explicit permission
    **ask** — deliberately ask, never deny, because the human approving the prompt IS the
-   gate. Hooks fire session-wide in the repo where the plugin is enabled.
+   gate. The human may move that gate **earlier in time** with a **git grant**
+   (`references/grants.md`): `sdlc-state.mjs grant --actions commit[,push[,tag]] --scope
+   cycle|phase:<p>|step:<p>/<agent>|task:PLAN-NNN [--mode once|standing]` — issuing it is
+   itself the one permission prompt — after which the *orchestrator* (never a subagent)
+   commits at a covered completion, only once that scope's latest gate verdict is PASS/WAIVED,
+   with the trailer `SDLC-Grant: G-NNN`; the guard checks the binding, spends the grant at
+   allow time (fail-closed) and logs every grant event to `gate_log`. `reopen` revokes the
+   grants that covered the reopened work, `cycle` expires them all, `revoke` is always
+   available and never prompts. Never grantable: `npm publish`, `gh release`, any
+   `HUMAN_CHECKPOINT` or `HUMAN_REVIEW_REQUIRED` decision. Hooks fire session-wide in the
+   repo where the plugin is enabled.
 5. **Don't yak-shave the target.** If a target repo's *pre-existing* toolchain is broken,
    that's a gate finding to route back — agents must NOT rewrite the target's dependency tree,
    add `resolutions`, monkey-patch `node_modules`, or add `postinstall` patches.
@@ -124,7 +135,10 @@ them as constraints, not suggestions; the rationale is recorded in the git histo
   reviewer), the Release/Operate depth wiring (the planner's human-executed rollback plan +
   the release gate's `CHECK 8 — ROLLBACK READINESS`; the telemetry monitor's
   `HEALTHY | DEGRADED | UNKNOWN` post-release verdict; the feedback loop's maintenance
-  pathway + CLAUDE.md rule accretion under `## Lessons learned (SDLC Operate)`), and the
+  pathway + CLAUDE.md rule accretion under `## Lessons learned (SDLC Operate)`), the
+  git-grant wiring (`grant` / `revoke` / the `🔑 Grants` board line / `SDLC-Grant:` in the
+  orchestrator; `references/grants.md` exists; every playbook's completion is
+  grant-conditional; **no agent file** mentions `SDLC-Grant` — subagents never commit), and the
   eval-harness wiring (the `SDLC_EVALS` opt-in gate in the runner; every
   case naming a real agent and a complete fixture — including any `docs/…` path the case's
   dispatch prompt references; nothing under `evals/` that `node --test`

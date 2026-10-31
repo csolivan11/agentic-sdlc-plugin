@@ -306,7 +306,7 @@ test('the HUMAN_CHECKPOINT sign-off protocol is defined and wired from the orche
 // nobody points at is dead weight; a pointer at a missing file is a silent stall).
 test('every lazily-loaded reference exists and is pointed at from the orchestrator', () => {
   const sdlc = readFileSync(join(ROOT, 'commands', 'sdlc.md'), 'utf8')
-  for (const ref of ['setup.md', 'escalation.md', 'checkpoints.md', 'model-routing.md']) {
+  for (const ref of ['setup.md', 'escalation.md', 'checkpoints.md', 'model-routing.md', 'grants.md']) {
     assert.ok(existsSync(join(ROOT, 'references', ref)), `missing references/${ref}`)
     assert.match(sdlc, new RegExp(`\\$\\{CLAUDE_PLUGIN_ROOT\\}/references/${ref.replace('.', '\\.')}`),
       `sdlc.md never points at references/${ref} via \${CLAUDE_PLUGIN_ROOT}`)
@@ -402,6 +402,42 @@ test('the route-back recovery mechanics (reopen + evidence) are wired into the w
   assert.match(verify, /reopen --phase develop/, 'phase 5 REWORK routing never reopens Develop')
   const release = readFileSync(join(ROOT, 'phases', 'phase-6-release.md'), 'utf8')
   assert.match(release, /reopen --phase verify/, 'phase 6 Verify-miss routing never reopens Verify')
+})
+
+// Invariant 4 (git stays human-authorized) with the gate moved earlier in time: a human
+// may pre-authorize a commit via a scoped, gate-bound, revocable grant. The orchestrator
+// alone commits under it; subagents must never learn the trailer, or reviewer ≠ author
+// and the release gate's "author committed = FAIL" check both erode.
+test('git grants are wired: reference, orchestrator, setup, every playbook, and no agent', () => {
+  const sdlc = readFileSync(join(ROOT, 'commands', 'sdlc.md'), 'utf8')
+  for (const needle of ['grant --actions', 'revoke --id', '🔑 Grants', 'SDLC-Grant:']) {
+    assert.ok(sdlc.includes(needle), `sdlc.md never mentions "${needle}"`)
+  }
+  assert.match(sdlc, /never a subagent/, 'the orchestrator does not reserve grant commits to itself')
+  const grants = readFileSync(join(ROOT, 'references', 'grants.md'), 'utf8')
+  for (const needle of ['task:', 'step:', 'phase:', 'cycle', 'standing', 'revoke', 'SDLC-Grant: G-NNN', 'never grantable']) {
+    assert.ok(grants.toLowerCase().includes(needle.toLowerCase()), `references/grants.md never covers "${needle}"`)
+  }
+  // first-time setup offers the one-time pre-authorization as a standing cycle-wide grant
+  const setup = readFileSync(join(ROOT, 'references', 'setup.md'), 'utf8')
+  assert.match(setup, /--scope cycle --mode standing/, 'setup never issues the standing cycle grant')
+  // every completion is grant-conditional, and publish stays human in Release
+  for (const f of readdirSync(join(ROOT, 'phases')).filter(f => f.endsWith('.md')).sort()) {
+    const text = readFileSync(join(ROOT, 'phases', f), 'utf8')
+    assert.match(text, /SDLC-Grant/, `${f}: completion is not grant-conditional`)
+    assert.match(text, /unless\s+an\s+active\s+grant\s+covers\s+this\s+completion/i, `${f}: lacks the grant conditional wording`)
+  }
+  const release = readFileSync(join(ROOT, 'phases', 'phase-6-release.md'), 'utf8')
+  assert.match(release, /never grantable/i, 'phase 6 lets a grant cover publish')
+  // the hook enforces the binding: it must import the grant matcher and spend the grant
+  const guard = readFileSync(join(ROOT, 'scripts', 'sdlc-guard.mjs'), 'utf8')
+  assert.match(guard, /matchGrant/, 'the guard never consults grants')
+  assert.match(guard, /consumeGrant/, 'the guard never spends a grant (would be reusable)')
+  // and no subagent ever commits — grant or no grant
+  for (const f of readdirSync(join(ROOT, 'agents')).filter(f => f.endsWith('.md'))) {
+    const text = readFileSync(join(ROOT, 'agents', f), 'utf8')
+    assert.doesNotMatch(text, /SDLC-Grant/, `agents/${f} knows the grant trailer — subagents never commit`)
+  }
 })
 
 test('Release/Operate depth: rollback plan, post-release health, maintenance pathway, rule accretion', () => {
