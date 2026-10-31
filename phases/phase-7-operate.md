@@ -50,3 +50,10 @@ agents), stores the assessment, bumps the cycle counter, and resets the next cyc
 (MAINTAIN/URGENT → develop..operate pending; EVOLVE → define..operate pending; STABLE =
 lifecycle complete, recorded directly with no checkpoint). Begin the new cycle at the first
 pending phase only on an explicit **go**; on **defer**, `/sdlc` resumes there later.
+
+**Committing the operate evidence:** `docs/operate/` (and any CLAUDE.md rule accretion) is
+staged and a commit message suggested — do NOT commit (git stays human-authorized)
+**unless an active grant covers this completion**. If one does, commit under it with the
+`SDLC-Grant: G-NNN` trailer **after the feedback-loop gate PASS is recorded and BEFORE
+running `cycle`** — `cycle` expires every grant, since a new cycle starts un-authorized —
+exactly as `references/grants.md` specifies. A grant never replaces the go/no-go.

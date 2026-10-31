@@ -26,6 +26,12 @@ an architecture overview.
 - **Gate FAIL:** re-dispatch sdlc-prepare-claude-md with the missing pieces named. If the
   gate FAILs **3** times, STOP and emit `HUMAN_REVIEW_REQUIRED` — do not keep looping.
 
-**On completion:** update `docs/requirements/sdlc-metadata.yml` — set
-`prepare.agents.explorer.status` and `prepare.agents.claude_md.status` to `"completed"`,
-and `prepare.status: "completed"`.
+**On completion:** record the orchestrator gate deterministically — this phase has no
+gate agent, so the verdict is yours: `gate-log --phase prepare --gate orchestrator
+--verdict PASS --note "CLAUDE.md verified"` via the state script — then set
+`prepare.agents.explorer.status`, `prepare.agents.claude_md.status` and `prepare.status`
+to `"completed"` with `complete --phase prepare --evidence "CLAUDE.md verified <date>"`
+(never hand-edit the YAML). Then **stage** `CLAUDE.md` and suggest a commit message — do
+NOT commit (git stays human-authorized) **unless an active grant covers this completion**:
+then commit under it with the `SDLC-Grant: G-NNN` trailer, exactly as
+`references/grants.md` specifies.

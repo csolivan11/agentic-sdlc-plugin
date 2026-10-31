@@ -37,4 +37,7 @@ orchestrator edits), then set every `design.agents.*.status` and `design.status`
 `"completed"` with
 `complete --phase design --evidence "design-reviewer VERDICT: PASS <date>; user sign-off <date>"`;
 set `design.adrs_count` to the number of ADRs written. `implementation-plans/` stays empty
-(Phase 4 populates it per change).
+(Phase 4 populates it per change). Then **stage** `docs/design/` and suggest a commit
+message — do NOT commit (git stays human-authorized) **unless an active grant covers this
+completion**: then commit under it with the `SDLC-Grant: G-NNN` trailer, exactly as
+`references/grants.md` specifies. A grant never replaces the sign-off above.

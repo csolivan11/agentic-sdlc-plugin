@@ -61,3 +61,25 @@ invariant 9):
 deterministically — never hand-edit the YAML (the guard hook denies it):
 
     node "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc-state.mjs" config --model-profile <quality|economy>
+
+## Pre-authorize commits? (first-time setup only)
+
+Right after the model profile, offer the one-time git pre-authorization — the lever that
+lets a long run (an IV&V cycle, a QA pass, a census) complete without a human on the Allow
+button. Git stays human-authorized either way; the choice is only *when* the human
+authorizes:
+
+- **none** (default) — every completion stages the change and suggests the commit; the
+  human commits.
+- **commit** — each phase completion in this cycle commits on its own, right after its
+  gate PASSes.
+- **commit + push** — as above, and pushes.
+
+A non-default pick issues ONE standing, cycle-wide grant (it raises one permission prompt —
+that approval is the human gate; the commits themselves will not prompt), and the status
+board shows it on every run until it is revoked or the cycle ends:
+
+    node "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc-state.mjs" grant --actions commit[,push] --scope cycle --mode standing --reason "first-time setup pick"
+
+`${CLAUDE_PLUGIN_ROOT}/references/grants.md` has the full protocol (scopes, revocation,
+the completion commit). Do not offer `tag` or any registry action here.

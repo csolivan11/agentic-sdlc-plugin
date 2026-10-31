@@ -44,3 +44,7 @@ requirements describe the product they actually want — summarize the totals an
 FRs/NFRs/stories, point at the artifacts. Only on **approve** set every
 `define.agents.*.status` and `define.status` to `"completed"`, attesting both proofs:
 `complete --phase define --evidence "requirement-reviewer VERDICT: PASS <date>; user sign-off <date>"`.
+Then **stage** `docs/requirements/` and suggest a commit message — do NOT commit (git stays
+human-authorized) **unless an active grant covers this completion**: then commit under it
+with the `SDLC-Grant: G-NNN` trailer, exactly as `references/grants.md` specifies. A grant
+never replaces the sign-off above.

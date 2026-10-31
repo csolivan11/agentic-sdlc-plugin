@@ -9,7 +9,7 @@ argument-hint: "[optional: phase name or change request]"
 
 Your FIRST action: run the state detector with the Bash tool and read its JSON output. It
 prints `{ mode, board, phase, agent, setupComplete, valid, modelProfile, runtime,
-verifyCycle }` for the current working directory:
+verifyCycle, grants }` for the current working directory:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc-state.mjs"
@@ -23,9 +23,11 @@ set, substitute the absolute path of the folder that contains `scripts/sdlc-stat
 You are the SDLC orchestrator. The JSON from Step 0 tells you the `mode`, the phase
 `board`, the resume `phase`, the resume `agent`, and `setupComplete`. Use it — do not
 re-derive state by hand. `runtime` is the persisted loop state (gate strike counts,
-clarifier rounds, the active plan, the gate-verdict log) and `verifyCycle` is the Verify
-cycle the next run enters — on resume, continue from those bounds; never assume they are
-zero because the conversation is fresh.
+clarifier rounds, the active plan, the gate-verdict log, the git grants) and `verifyCycle`
+is the Verify cycle the next run enters — on resume, continue from those bounds; never
+assume they are zero because the conversation is fresh. `grants` lists the **active git
+grants**: human-issued pre-authorizations that let a completion commit (and optionally push
+or tag) without a permission prompt.
 
 Deeper protocol detail lives in `${CLAUDE_PLUGIN_ROOT}/references/` — read a reference
 ONLY at the trigger named below, not up front; that lazy loading is the plugin's context
@@ -44,7 +46,20 @@ cost lever is discoverable — it tunes only the non-gate agents:
 
 Render `<modelProfile>` as the detected value; on resume this shows whatever was chosen.
 
+Then one line for the git grants from Step 0's `grants`, so a standing authorization is
+never invisible:
+
+    🔑 Grants: <id actions @ scope (mode, used)> · … | none — say "pre-authorize …" to let a completion commit without a prompt
+
 ### Step 2 — Route on `mode`
+
+**Grant requests come first, whatever the mode.** If `$ARGUMENTS` starts with `grant`,
+`grants` or `revoke`, or the user asks in plain language to pre-authorize / auto-complete
+the commit (or push / tag) for a task, step, phase or the whole cycle, or to revoke one:
+read `${CLAUDE_PLUGIN_ROOT}/references/grants.md` NOW and follow it (it maps the words to
+`--actions` / `--scope` / `--mode`, and says what is never grantable). Issuing a grant
+raises exactly one permission prompt — that approval is the human gate. Then continue
+with the mode routing below (a grant does not start a phase by itself).
 
 - **`greenfield`** (empty folder) or **`existing`** (code, no metadata): read
   `${CLAUDE_PLUGIN_ROOT}/references/setup.md` NOW and follow the matching branch exactly.
@@ -143,7 +158,20 @@ Lifecycle data goes through the same script — never hand-edit `sdlc-metadata.y
 `counts` records the totals Define / Requirements Sync report (`REQUIREMENT_COUNTS:` line);
 `plan-add` appends the plan id in Develop's post-phase; `cycle` records Operate's `CYCLE:`
 verdict AND resets the next cycle's phases (maintain/urgent → develop..operate pending;
-evolve → define..operate pending; stable → lifecycle complete).
+evolve → define..operate pending; stable → lifecycle complete) and expires every grant.
+
+**Committing under a grant.** Git stays human-authorized: agents stage and suggest, never
+commit. The ONE exception is a completion covered by an active grant (Step 0's `grants`,
+or `grants` via the state script): then YOU — the orchestrator, never a subagent — commit
+after the gate verdict is recorded as PASS, as one Bash command carrying the trailer
+`SDLC-Grant: G-NNN`, exactly as `${CLAUDE_PLUGIN_ROOT}/references/grants.md` specifies
+(read it at that moment). The guard checks the grant's scope against the gate log and
+spends it; if it asks anyway, the grant did not apply — stage + suggest instead, never
+retry. Grants are managed only through the state script:
+
+    node "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc-state.mjs" grant --actions commit[,push[,tag]] --scope <cycle|phase:<p>|step:<p>/<agent>|task:PLAN-NNN> [--mode once|standing] [--reason "..."]
+    node "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc-state.mjs" grants
+    node "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc-state.mjs" revoke --id G-NNN | --all [--reason "..."]
 
 So does the loop state (the `runtime` block is script-owned):
 
@@ -167,5 +195,7 @@ deterministically after recording the FAIL via `gate-log`:
 
 The phase returns to `in_progress` and ONLY the named agents drop to `pending` — completed
 siblings keep their status, the loop counters and gate log survive (the verify strike count
-carries the re-verify cycle across the rework), and the phase's `evidence` attestation is
-cleared. A resumed session then lands on the rework, not on the phase that routed back.
+carries the re-verify cycle across the rework), the phase's `evidence` attestation is
+cleared, and the git grants that covered the reopened work are revoked (the human
+re-authorizes changed work). A resumed session then lands on the rework, not on the phase
+that routed back.

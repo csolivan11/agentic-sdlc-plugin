@@ -30,7 +30,11 @@ Prerequisite: the Develop phase has completed the change(s) under verification.
    whose counts lack a verbatim evidence block cannot PASS its gate condition. The gate fails
    (REWORK REQUIRED) if the release build did not exit 0 and produce its artifact
    (condition c2).
-   - **READY FOR RELEASE:** set every `verify.agents.*.status` and `verify.status` to `"completed"`.
+   - **READY FOR RELEASE:** set every `verify.agents.*.status` and `verify.status` to
+     `"completed"`. The verification reports under `docs/` are evidence: **stage** them and
+     suggest a commit message — do NOT commit (git stays human-authorized) **unless an
+     active grant covers this completion**: then commit under it with the
+     `SDLC-Grant: G-NNN` trailer, exactly as `references/grants.md` specifies.
    - **Gate FAIL (REWORK REQUIRED):** do NOT update Verify's status. Record the FAIL via
      `gate-log --phase verify`, then **reopen Develop deterministically** —
      `reopen --phase develop --agent <the responsible author(s), e.g. code_author test_author>`

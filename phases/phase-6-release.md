@@ -7,7 +7,7 @@ groups:
   - { mode: sequential, agents: [sdlc-release-author] }
   - { mode: sequential, agents: [sdlc-release-reviewer] }
 gate_after_each_group: true
-post_phase: "set release.status + agent statuses completed; the release is STAGED with a suggested commit + tag — commit, tag, push, and publish are ALL human-gated (do none of them); hand the human the rollback plan alongside the publish commands"
+post_phase: "set release.status + agent statuses completed; the release is STAGED with a suggested commit + tag — commit, tag, push, and publish are ALL human-gated (do none of them) unless an active grant covers this completion, in which case the orchestrator commits (+tag/push per the grant, SDLC-Grant trailer) and publish stays human; hand the human the rollback plan alongside the publish commands"
 ---
 
 # Phase 6 — Release (Transition)
@@ -45,3 +45,12 @@ report that the artifacts are staged and ready, and give the exact commit/tag/pu
 commands for the human to run **together with the release plan's rollback plan** (trigger
 conditions + the exact human-executed rollback commands for each stage), so the human holds
 the undo before running the do.
+
+**Unless an active grant covers this completion** (`phase:release`,
+`step:release/release_reviewer` or `cycle`): then YOU — the orchestrator, after the
+release-reviewer's PASS is recorded — run the commit, and the tag and push only if the grant
+carries `tag` / `push`, as one command with the `SDLC-Grant: G-NNN` trailer, exactly as
+`references/grants.md` specifies. **Publishing to a registry is never grantable** — hand the
+human the publish command and the rollback plan exactly as above, now stage-aware for the
+stage actually reached (committed / tagged / pushed). The release author still never
+commits; the reviewer's "author committed = FAIL" check is unchanged.

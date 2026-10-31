@@ -11,7 +11,7 @@ groups:
   - { mode: sequential, agents: [sdlc-develop-reqs-sync] }
   - { mode: sequential, agents: [sdlc-develop-code-reviewer] }
 gate_after_each_group: true
-post_phase: "stage the change + suggest a commit message (do NOT commit/push); record the PLAN-NNN id + requirement counts via the state script (plan-add, counts); set develop.status completed; develop is repeatable"
+post_phase: "record the PLAN-NNN id + requirement counts via the state script (plan-add, counts); set develop.status completed; stage the change + suggest a commit message (do NOT commit/push) unless an active grant covers this completion — then the orchestrator commits under it (SDLC-Grant trailer); develop is repeatable"
 ---
 
 # Phase 4 — Develop (repeatable, one change per run)
@@ -76,10 +76,14 @@ Dispatch (steps marked ⊘ are skipped for 🟢 trivial):
    FR/US + traceability rows (reviewer ≠ author still holds) to confirm their acceptance criteria
    match the shipped behavior before completion.
 
-**On completion:** **stage** the change (`git add` the touched files) and **suggest a commit
-message** to the user — do NOT commit or push (git stays human-gated). Then record the
-lifecycle data deterministically — never hand-edit the YAML:
+**On completion:** record the lifecycle data deterministically — never hand-edit the YAML:
 `node "${CLAUDE_PLUGIN_ROOT}/scripts/sdlc-state.mjs" plan-add --id PLAN-NNN`, then `counts`
 with the totals from Requirements Sync's `REQUIREMENT_COUNTS:` line, then
-`complete --phase develop`. Develop is repeatable — a later feature starts a fresh run at
-the planner.
+`complete --phase develop`. Then **stage** the change (`git add` the touched files) and
+**suggest a commit message** to the user — do NOT commit or push (git stays
+human-authorized) **unless an active grant covers this completion** (`task:PLAN-NNN`,
+`phase:develop`, `step:develop/code_reviewer` or `cycle` — Step 0's `grants`): then YOU
+commit under it (and push only if the grant carries `push`) with the `SDLC-Grant: G-NNN`
+trailer, exactly as `references/grants.md` specifies, and report the sha. The authors and
+the reviewer never commit either way. Develop is repeatable — a later feature starts a
+fresh run at the planner.
