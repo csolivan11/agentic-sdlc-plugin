@@ -737,7 +737,7 @@ const WITH_RUNTIME = `sdlc:
       - "2026-07-02 develop code_reviewer PASS"
 `
 
-const EMPTY_RUNTIME = { activePlan: null, gateAttempts: {}, clarifierRounds: {}, gateLog: [] }
+const EMPTY_RUNTIME = { activePlan: null, gateAttempts: {}, clarifierRounds: {}, gateLog: [], grants: [] }
 
 test('parseMetadata reads the script-owned runtime block', () => {
   const md = parseMetadata(WITH_RUNTIME)
@@ -1071,4 +1071,256 @@ test('CLI: plan-active sets the pointer, clarifier-round counts, loop-reset clea
   assert.deepEqual(d.json.runtime.clarifierRounds, {})
   assert.equal(d.json.runtime.activePlan, 'PLAN-001') // guidance resumes the same plan
   assert.equal(runCLI(dir, ['loop-reset', '--phase', 'nope']).json.ok, false)
+})
+
+// ── Git grants: a human pre-authorizes commit/push/tag for a completion, scoped,
+// single-use by default, revocable, bound to a PASSed gate. Script-owned, like the
+// rest of runtime — the guard reads them, the state script writes them.
+
+import {
+  issueGrant, revokeGrants, consumeGrant, matchGrant, latestVerdict, parseScope,
+  GRANT_ACTIONS, GRANT_MODES,
+} from '../scripts/sdlc-state.mjs'
+
+const D = '2026-10-31'
+
+test('grant vocab: exactly commit/push/tag are grantable; once|standing are the modes', () => {
+  assert.deepEqual(GRANT_ACTIONS, ['commit', 'push', 'tag'])
+  assert.deepEqual(GRANT_MODES, ['once', 'standing'])
+})
+
+test('parseScope accepts the four scope kinds and rejects everything else', () => {
+  const phases = parseMetadata(MIDWAY).phases
+  assert.deepEqual(parseScope('cycle', phases), { kind: 'cycle' })
+  assert.deepEqual(parseScope('phase:release', phases), { kind: 'phase', phase: 'release' })
+  assert.deepEqual(parseScope('step:develop/code_author', phases), { kind: 'step', phase: 'develop', agent: 'code_author' })
+  assert.deepEqual(parseScope('task:PLAN-004', phases), { kind: 'task', plan: 'PLAN-004' })
+  for (const bad of ['phase:ship', 'step:develop/ghost', 'step:develop', 'task:', 'task:bad id', 'release', '', undefined]) {
+    assert.equal(parseScope(bad, phases), null, `${bad}: expected null`)
+  }
+})
+
+test('issueGrant assigns G-001, G-002…, defaults to once, and writes a parseable block', () => {
+  const r1 = issueGrant(MIDWAY, { actions: ['commit', 'push'], scope: 'phase:develop', reason: 'IV&V "auto"', date: D })
+  assert.equal(r1.grant.id, 'G-001')
+  assert.equal(r1.grant.mode, 'once')
+  assert.equal(r1.grant.status, 'active')
+  const r2 = issueGrant(r1.content, { actions: ['commit'], scope: 'cycle', mode: 'standing', date: D })
+  assert.equal(r2.grant.id, 'G-002')
+  const md = parseMetadata(r2.content)
+  assert.equal(md.valid, true)
+  assert.equal(md.phases.develop.status, 'in_progress') // phases untouched
+  assert.deepEqual(md.phases.develop.agents.map(a => a.name), ['architect_planner', 'code_author', 'test_author'])
+  assert.equal(md.runtime.grants.length, 2)
+  const g = md.runtime.grants[0]
+  assert.deepEqual(g.actions, ['commit', 'push'])
+  assert.equal(g.scope, 'phase:develop')
+  assert.equal(g.reason, 'IV&V "auto"') // quotes round-trip
+  assert.equal(g.issued, D)
+  assert.deepEqual(g.used, [])
+  assert.equal(md.runtime.grants[1].mode, 'standing')
+  assert.ok(md.runtime.gateLog.some(l => l === `${D} grant G-001 ISSUED -- commit,push @ phase:develop once`))
+})
+
+test('issueGrant rejects unknown actions, publish, bad scopes and bad modes', () => {
+  assert.equal(issueGrant(MIDWAY, { actions: ['publish'], scope: 'cycle', date: D }), null)
+  assert.equal(issueGrant(MIDWAY, { actions: [], scope: 'cycle', date: D }), null)
+  assert.equal(issueGrant(MIDWAY, { actions: ['commit'], scope: 'phase:ship', date: D }), null)
+  assert.equal(issueGrant(MIDWAY, { actions: ['commit'], scope: 'cycle', mode: 'forever', date: D }), null)
+})
+
+test('issueGrant ids keep counting past revoked/consumed grants (never reuse an id)', () => {
+  let y = issueGrant(MIDWAY, { actions: ['commit'], scope: 'cycle', date: D }).content
+  y = revokeGrants(y, { id: 'G-001', date: D }).content
+  const r = issueGrant(y, { actions: ['commit'], scope: 'cycle', date: D })
+  assert.equal(r.grant.id, 'G-002')
+})
+
+test('consumeGrant: a once grant is consumed only after every action it carries is used', () => {
+  const y = issueGrant(MIDWAY, { actions: ['commit', 'push'], scope: 'phase:develop', date: D }).content
+  const a = consumeGrant(y, { id: 'G-001', action: 'commit', date: D })
+  assert.equal(a.grant.status, 'active')
+  assert.deepEqual(a.grant.used, ['commit'])
+  const b = consumeGrant(a.content, { id: 'G-001', action: 'push', date: D })
+  assert.equal(b.grant.status, 'consumed')
+  assert.deepEqual(b.grant.used, ['commit', 'push'])
+  assert.equal(b.grant.consumed, D)
+  const md = parseMetadata(b.content)
+  assert.equal(md.runtime.grants[0].status, 'consumed')
+  assert.ok(md.runtime.gateLog.some(l => l === `${D} grant G-001 USED -- commit`))
+  assert.ok(md.runtime.gateLog.some(l => l === `${D} grant G-001 USED -- push`))
+  // a consumed grant cannot be used again; an action outside the grant is refused
+  assert.equal(consumeGrant(b.content, { id: 'G-001', action: 'commit', date: D }), null)
+  assert.equal(consumeGrant(y, { id: 'G-001', action: 'tag', date: D }), null)
+  assert.equal(consumeGrant(y, { id: 'G-999', action: 'commit', date: D }), null)
+})
+
+test('consumeGrant: a standing grant stays active across uses but still logs each one', () => {
+  const y = issueGrant(MIDWAY, { actions: ['commit'], scope: 'cycle', mode: 'standing', date: D }).content
+  const a = consumeGrant(y, { id: 'G-001', action: 'commit', date: D })
+  const b = consumeGrant(a.content, { id: 'G-001', action: 'commit', date: D })
+  assert.equal(b.grant.status, 'active')
+  assert.equal(parseMetadata(b.content).runtime.gateLog.filter(l => /G-001 USED/.test(l)).length, 2)
+})
+
+test('revokeGrants by id and --all; revoking a non-active grant is a loud null', () => {
+  let y = issueGrant(MIDWAY, { actions: ['commit'], scope: 'cycle', date: D }).content
+  y = issueGrant(y, { actions: ['push'], scope: 'phase:release', date: D }).content
+  const one = revokeGrants(y, { id: 'G-001', reason: 'changed my mind', date: D })
+  assert.deepEqual(one.revoked, ['G-001'])
+  const md = parseMetadata(one.content)
+  assert.equal(md.runtime.grants[0].status, 'revoked')
+  assert.equal(md.runtime.grants[0].revoked, D)
+  assert.equal(md.runtime.grants[1].status, 'active')
+  assert.ok(md.runtime.gateLog.some(l => l === `${D} grant G-001 REVOKED -- changed my mind`))
+  assert.equal(revokeGrants(one.content, { id: 'G-001', date: D }), null) // already revoked
+  assert.equal(revokeGrants(one.content, { id: 'G-404', date: D }), null)
+  const all = revokeGrants(one.content, { all: true, date: D })
+  assert.deepEqual(all.revoked, ['G-002'])
+  assert.deepEqual(revokeGrants(all.content, { all: true, date: D }).revoked, []) // nothing active: ok, empty
+})
+
+test('latestVerdict reads the newest PASS/FAIL/WAIVED per phase, or overall, from the gate log', () => {
+  const log = [
+    '2026-07-01 develop code_reviewer FAIL -- 3 blockers',
+    '2026-07-02 develop code_reviewer PASS',
+    '2026-07-03 verify validation_reviewer FAIL -- REWORK',
+    '2026-07-03 grant G-001 ISSUED -- commit @ cycle once', // not a verdict
+  ]
+  assert.equal(latestVerdict(log, 'develop'), 'PASS')
+  assert.equal(latestVerdict(log, 'verify'), 'FAIL')
+  assert.equal(latestVerdict(log, 'release'), null)
+  assert.equal(latestVerdict(log), 'FAIL') // overall = the newest verdict line
+  assert.equal(latestVerdict([]), null)
+})
+
+// matchGrant is the guard's question: "may this git action run right now, and under which grant?"
+function withLog(content, lines) {
+  let out = content
+  for (const l of lines) {
+    const [date, phase, gate, verdict] = l.split(' ')
+    out = recordGateVerdict(out, { phase, gate, verdict, date }).content
+  }
+  return out
+}
+
+test('matchGrant phase scope: honoured only when that phase\'s latest verdict is PASS or WAIVED', () => {
+  const base = issueGrant(MIDWAY, { actions: ['commit'], scope: 'phase:develop', date: D }).content
+  const none = matchGrant(parseMetadata(base), 'commit')
+  assert.equal(none.grant, null)
+  assert.match(none.reason, /develop/)
+  assert.match(none.reason, /no gate verdict|not PASS/i)
+  const failed = withLog(base, ['2026-10-30 develop code_reviewer FAIL'])
+  assert.equal(matchGrant(parseMetadata(failed), 'commit').grant, null)
+  const passed = withLog(failed, ['2026-10-31 develop code_reviewer PASS'])
+  assert.equal(matchGrant(parseMetadata(passed), 'commit').grant.id, 'G-001')
+  const waived = withLog(failed, ['2026-10-31 develop code_reviewer WAIVED'])
+  assert.equal(matchGrant(parseMetadata(waived), 'commit').grant.id, 'G-001')
+  // the action must be one the grant carries
+  const push = matchGrant(parseMetadata(passed), 'push')
+  assert.equal(push.grant, null)
+  assert.match(push.reason, /no active grant/i)
+})
+
+test('matchGrant step scope binds to the step\'s phase verdict; task scope to the active plan', () => {
+  const step = issueGrant(MIDWAY, { actions: ['commit'], scope: 'step:develop/code_author', date: D }).content
+  assert.equal(matchGrant(parseMetadata(step), 'commit').grant, null)
+  assert.equal(matchGrant(parseMetadata(withLog(step, ['2026-10-31 develop code_reviewer PASS'])), 'commit').grant.id, 'G-001')
+
+  let task = issueGrant(MIDWAY, { actions: ['commit'], scope: 'task:PLAN-004', date: D }).content
+  task = withLog(task, ['2026-10-31 develop code_reviewer PASS'])
+  const wrongPlan = matchGrant(parseMetadata(setActivePlan(task, 'PLAN-005')), 'commit')
+  assert.equal(wrongPlan.grant, null)
+  assert.match(wrongPlan.reason, /PLAN-004/)
+  assert.equal(matchGrant(parseMetadata(setActivePlan(task, 'PLAN-004')), 'commit').grant.id, 'G-001')
+})
+
+test('matchGrant cycle scope binds to the newest verdict overall', () => {
+  const y = issueGrant(MIDWAY, { actions: ['commit', 'push'], scope: 'cycle', mode: 'standing', date: D }).content
+  assert.equal(matchGrant(parseMetadata(y), 'commit').grant, null)
+  const ok = withLog(y, ['2026-10-31 define requirement_reviewer PASS'])
+  assert.equal(matchGrant(parseMetadata(ok), 'push').grant.id, 'G-001')
+  const thenFail = withLog(ok, ['2026-11-01 design design_reviewer FAIL'])
+  assert.equal(matchGrant(parseMetadata(thenFail), 'push').grant, null)
+})
+
+test('matchGrant skips consumed/revoked grants and picks the first active match', () => {
+  let y = issueGrant(MIDWAY, { actions: ['commit'], scope: 'phase:develop', date: D }).content
+  y = issueGrant(y, { actions: ['commit'], scope: 'phase:develop', date: D }).content
+  y = withLog(y, ['2026-10-31 develop code_reviewer PASS'])
+  y = revokeGrants(y, { id: 'G-001', date: D }).content
+  assert.equal(matchGrant(parseMetadata(y), 'commit').grant.id, 'G-002')
+  y = consumeGrant(y, { id: 'G-002', action: 'commit', date: D }).content
+  assert.equal(matchGrant(parseMetadata(y), 'commit').grant, null)
+})
+
+test('reopenPhase revokes the grants the rework invalidates (phase, its steps, its tasks, cycle)', () => {
+  let y = updateStatus(MIDWAY, { phase: 'develop', status: 'completed' })
+  y = issueGrant(y, { actions: ['commit'], scope: 'phase:develop', date: D }).content   // G-001
+  y = issueGrant(y, { actions: ['commit'], scope: 'step:develop/code_author', date: D }).content // G-002
+  y = issueGrant(y, { actions: ['commit'], scope: 'task:PLAN-004', date: D }).content   // G-003
+  y = issueGrant(y, { actions: ['commit'], scope: 'cycle', mode: 'standing', date: D }).content // G-004
+  y = issueGrant(y, { actions: ['commit'], scope: 'phase:release', date: D }).content   // G-005 survives
+  const out = reopenPhase(y, { phase: 'develop', agents: ['code_author'], date: D })
+  const byId = Object.fromEntries(parseMetadata(out).runtime.grants.map(g => [g.id, g.status]))
+  assert.deepEqual(byId, { 'G-001': 'revoked', 'G-002': 'revoked', 'G-003': 'revoked', 'G-004': 'revoked', 'G-005': 'active' })
+  assert.ok(parseMetadata(out).runtime.gateLog.some(l => /grant G-001 REVOKED -- reopen develop/.test(l)))
+})
+
+test('reopenPhase of verify leaves task grants alone (tasks belong to develop)', () => {
+  let y = allCompleted()
+  y = issueGrant(y, { actions: ['commit'], scope: 'task:PLAN-004', date: D }).content
+  y = issueGrant(y, { actions: ['commit'], scope: 'phase:verify', date: D }).content
+  const byId = Object.fromEntries(parseMetadata(reopenPhase(y, { phase: 'verify', date: D })).runtime.grants.map(g => [g.id, g.status]))
+  assert.deepEqual(byId, { 'G-001': 'active', 'G-002': 'revoked' })
+})
+
+test('recordCycle expires every remaining active grant (a new cycle starts un-authorized)', () => {
+  let y = allCompleted()
+  y = issueGrant(y, { actions: ['commit'], scope: 'cycle', mode: 'standing', date: D }).content
+  y = issueGrant(y, { actions: ['commit'], scope: 'phase:release', date: D }).content
+  y = revokeGrants(y, { id: 'G-002', date: D }).content
+  const out = recordCycle(y, { assessment: 'maintain', nextCycle: true, date: '2026-11-02' })
+  const grants = parseMetadata(out).runtime.grants
+  assert.equal(grants[0].status, 'expired')
+  assert.equal(grants[1].status, 'revoked') // untouched
+  assert.ok(parseMetadata(out).runtime.gateLog.some(l => l === '2026-11-02 grant G-001 EXPIRED -- cycle'))
+  assert.equal(parseMetadata(out).valid, true)
+})
+
+test('computeState surfaces the active grants', () => {
+  let y = issueGrant(MIDWAY, { actions: ['commit'], scope: 'cycle', date: D }).content
+  y = issueGrant(y, { actions: ['push'], scope: 'cycle', date: D }).content
+  y = revokeGrants(y, { id: 'G-001', date: D }).content
+  const s = computeState({ hasMetadata: true, metadataContent: y, hasCode: true })
+  assert.deepEqual(s.grants.map(g => g.id), ['G-002'])
+  assert.deepEqual(computeState({ hasMetadata: false, metadataContent: '', hasCode: false }).grants, [])
+})
+
+test('CLI: grant / grants / revoke round-trip and validate their inputs', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sdlc-cli-'))
+  runCLI(dir, ['init', '--name', 'x', '--version', '0.1.0', '--mode', 'existing'])
+  const g = runCLI(dir, ['grant', '--actions', 'commit,push', '--scope', 'phase:release', '--reason', 'auto-complete', '--date', D])
+  assert.equal(g.json.ok, true)
+  assert.equal(g.json.grant.id, 'G-001')
+  assert.deepEqual(g.json.grant.actions, ['commit', 'push'])
+  assert.equal(g.json.grant.mode, 'once')
+  assert.equal(runCLI(dir, ['grant', '--actions', 'commit', '--scope', 'cycle', '--mode', 'standing']).json.grant.id, 'G-002')
+  const list = runCLI(dir, ['grants'])
+  assert.equal(list.json.ok, true)
+  assert.deepEqual(list.json.grants.map(x => x.id), ['G-001', 'G-002'])
+  const r = runCLI(dir, ['revoke', '--id', 'G-001', '--reason', 'no longer needed'])
+  assert.deepEqual(r.json.revoked, ['G-001'])
+  assert.deepEqual(runCLI(dir, ['grants']).json.grants.map(x => `${x.id}:${x.status}`), ['G-002:active', 'G-001:revoked']) // active first
+  assert.deepEqual(runCLI(dir, ['revoke', '--all']).json.revoked, ['G-002'])
+  // loud failures
+  assert.equal(runCLI(dir, ['grant', '--actions', 'publish', '--scope', 'cycle']).json.ok, false)
+  assert.equal(runCLI(dir, ['grant', '--actions', 'commit', '--scope', 'phase:ship']).json.ok, false)
+  assert.equal(runCLI(dir, ['grant', '--actions', 'commit']).json.ok, false) // --scope required
+  assert.equal(runCLI(dir, ['grant', '--actions', 'commit', '--scope', 'cycle', '--mode', 'forever']).json.ok, false)
+  assert.equal(runCLI(dir, ['revoke', '--id', 'G-001']).json.ok, false) // already revoked
+  assert.equal(runCLI(dir, ['revoke']).json.ok, false) // --id or --all required
+  const d = runCLI(dir, ['detect'])
+  assert.deepEqual(d.json.grants, [])
+  assert.equal(d.json.runtime.grants.length, 2)
 })

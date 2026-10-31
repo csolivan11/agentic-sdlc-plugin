@@ -11,9 +11,16 @@ export const SETUP_PHASES = ['prepare', 'define', 'design']
 export const MODEL_PROFILES = ['quality', 'balanced', 'economy']
 export const STATUSES = ['pending', 'in_progress', 'completed']
 
+// Git grants: what a human may pre-authorize (never `publish` — a registry push is
+// irreversible and stays an explicit permission prompt), and how long a grant lives.
+export const GRANT_ACTIONS = ['commit', 'push', 'tag']
+export const GRANT_MODES = ['once', 'standing']
+export const GRANT_STATUSES = ['active', 'consumed', 'revoked', 'expired']
+
 // The script-owned runtime block: persisted loop state (gate strike counters, clarifier
-// rounds, the active plan, the gate-verdict log). Empty shape used wherever it's absent.
-const emptyRuntime = () => ({ activePlan: null, gateAttempts: {}, clarifierRounds: {}, gateLog: [] })
+// rounds, the active plan, the gate-verdict log, the git grants). Empty shape used
+// wherever it's absent.
+const emptyRuntime = () => ({ activePlan: null, gateAttempts: {}, clarifierRounds: {}, gateLog: [], grants: [] })
 
 // Parse the known-shape metadata YAML without a YAML dependency.
 // Returns { valid, project, version, phases: { key: { status, agents: [{name,status}] } }, runtime }
@@ -46,13 +53,24 @@ export function parseMetadata(content) {
     if (/^\s{2}runtime:\s*$/.test(line)) { inRuntime = true; runtimeSection = null; continue }
     if (inRuntime && /^\s{2}\S/.test(line)) { inRuntime = false; runtimeSection = null }
     if (inRuntime) {
-      const sec = line.match(/^\s{4}(gate_attempts|clarifier_rounds|gate_log):\s*$/)
+      const sec = line.match(/^\s{4}(gate_attempts|clarifier_rounds|gate_log|grants):\s*$/)
       if (sec) { runtimeSection = sec[1]; continue }
       const ap = line.match(/^\s{4}active_plan:\s*"?([^"]*)"?\s*$/)
       if (ap) { out.runtime.activePlan = ap[1].trim() || null; runtimeSection = null; continue }
       if (runtimeSection === 'gate_log') {
         const item = line.match(/^\s{6}- "(.*)"\s*$/)
         if (item) out.runtime.gateLog.push(item[1].replace(/\\(["\\])/g, '$1'))
+      } else if (runtimeSection === 'grants') {
+        // `      - id: "G-001"` opens a grant; `        key: "value"` fills it
+        const head = line.match(/^\s{6}- id:\s*"(.*)"\s*$/)
+        if (head) { out.runtime.grants.push(emptyGrant(yamlUnquote(head[1]))); continue }
+        const kv = line.match(/^\s{8}(\w+):\s*"(.*)"\s*$/)
+        const g = out.runtime.grants[out.runtime.grants.length - 1]
+        if (kv && g) {
+          const v = yamlUnquote(kv[2])
+          if (kv[1] === 'actions' || kv[1] === 'used') g[kv[1]] = v ? v.split(',') : []
+          else if (kv[1] in g) g[kv[1]] = v
+        }
       } else if (runtimeSection) {
         const kv = line.match(/^\s{6}([\w-]+):\s*(\d+)\s*$/)
         if (kv) {
@@ -123,11 +141,12 @@ export function computeState({ hasMetadata, metadataContent, hasCode }) {
       modelProfile: 'balanced',
       runtime: emptyRuntime(),
       verifyCycle: 1,
+      grants: [],
     }
   }
   const md = parseMetadata(metadataContent)
   if (!md.valid) {
-    return { mode: 'resume', valid: false, project: null, version: null, board: [], phase: null, agent: null, setupComplete: false, modelProfile: 'balanced', runtime: emptyRuntime(), verifyCycle: 1 }
+    return { mode: 'resume', valid: false, project: null, version: null, board: [], phase: null, agent: null, setupComplete: false, modelProfile: 'balanced', runtime: emptyRuntime(), verifyCycle: 1, grants: [] }
   }
   const board = PHASES.map((key, i) => ({
     num: i + 1,
@@ -157,7 +176,9 @@ export function computeState({ hasMetadata, metadataContent, hasCode }) {
   const modelProfile = MODEL_PROFILES.includes(md.modelProfile) ? md.modelProfile : 'balanced'
   // Cycle 1 = the initial Verify run; each recorded verify FAIL (REWORK REQUIRED) bumps it.
   const verifyCycle = (md.runtime.gateAttempts.verify || 0) + 1
-  return { mode: 'resume', valid: true, project: md.project, version: md.version, board, phase, agent, setupComplete, modelProfile, runtime: md.runtime, verifyCycle }
+  // The active git grants, surfaced so the board can show the standing authorizations.
+  const grants = md.runtime.grants.filter(g => g.status === 'active')
+  return { mode: 'resume', valid: true, project: md.project, version: md.version, board, phase, agent, setupComplete, modelProfile, runtime: md.runtime, verifyCycle, grants }
 }
 
 const CODE_MANIFESTS = ['package.json', 'Cargo.toml', 'pyproject.toml', 'go.mod', 'pom.xml', 'build.gradle', 'Gemfile', 'composer.json']
@@ -249,6 +270,10 @@ export function setModelProfile(content, profile) {
 // Quote a value as a single-line YAML double-quoted scalar.
 function yamlQuote(value) {
   return '"' + String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ') + '"'
+}
+// Undo yamlQuote on the text between the quotes.
+function yamlUnquote(inner) {
+  return inner.replace(/\\(["\\])/g, '$1')
 }
 
 // Drop a 2-space-indented block: its `  <key>:` line plus every deeper-indented line after it.
@@ -390,6 +415,21 @@ function writeRuntime(content, rt) {
     block.push('    gate_log:')
     for (const e of rt.gateLog) block.push(`      - ${yamlQuote(e)}`)
   }
+  if (rt.grants.length) {
+    block.push('    grants:')
+    for (const g of rt.grants) {
+      block.push(`      - id: ${yamlQuote(g.id)}`)
+      block.push(`        actions: ${yamlQuote(g.actions.join(','))}`)
+      block.push(`        scope: ${yamlQuote(g.scope)}`)
+      block.push(`        mode: ${yamlQuote(g.mode)}`)
+      block.push(`        status: ${yamlQuote(g.status)}`)
+      block.push(`        issued: ${yamlQuote(g.issued)}`)
+      if (g.reason) block.push(`        reason: ${yamlQuote(g.reason)}`)
+      if (g.used.length) block.push(`        used: ${yamlQuote(g.used.join(','))}`)
+      if (g.consumed) block.push(`        consumed: ${yamlQuote(g.consumed)}`)
+      if (g.revoked) block.push(`        revoked: ${yamlQuote(g.revoked)}`)
+    }
+  }
   if (block.length) {
     let end = lines.length
     while (end > 0 && lines[end - 1].trim() === '') end--
@@ -414,6 +454,174 @@ export function recordGateVerdict(content, { phase, gate, verdict, note, date })
   }
   rt.gateLog.push(`${date} ${phase} ${gate} ${verdict}${note ? ` -- ${note}` : ''}`)
   return { content: writeRuntime(content, rt), strikes: rt.gateAttempts[phase] || 0 }
+}
+
+// ── Git grants ──────────────────────────────────────────────────
+// A grant is the human gate moved earlier in time: explicit (issued by a human-approved
+// command), scoped to a completion, bound to a PASSed gate, single-use by default,
+// revocable, and logged. The guard reads them; only this script writes them.
+
+const emptyGrant = (id) => ({
+  id, actions: [], scope: '', mode: 'once', status: 'active', issued: '', reason: '',
+  used: [], consumed: '', revoked: '',
+})
+
+const PLAN_ID_RE = /^[A-Za-z0-9._-]+$/
+
+// Parse a scope string against the known phases (and, for a step, the phase's roster).
+// Returns { kind, phase?, agent?, plan? } or null when the scope cannot be honoured.
+export function parseScope(scope, phases = {}) {
+  if (typeof scope !== 'string') return null
+  if (scope === 'cycle') return { kind: 'cycle' }
+  let m = scope.match(/^phase:(\w+)$/)
+  if (m) return PHASES.includes(m[1]) ? { kind: 'phase', phase: m[1] } : null
+  m = scope.match(/^step:(\w+)\/([\w-]+)$/)
+  if (m) {
+    if (!PHASES.includes(m[1])) return null
+    const ph = phases[m[1]]
+    if (!ph || !ph.agents.some(a => a.name === m[2])) return null
+    return { kind: 'step', phase: m[1], agent: m[2] }
+  }
+  m = scope.match(/^task:(.+)$/)
+  if (m) return PLAN_ID_RE.test(m[1]) ? { kind: 'task', plan: m[1] } : null
+  return null
+}
+
+function grantLog(rt, date, id, event, detail) {
+  rt.gateLog.push(`${date} grant ${id} ${event}${detail ? ` -- ${detail}` : ''}`)
+}
+
+// Issue a grant. Validates actions (subset of GRANT_ACTIONS, non-empty), scope, and mode;
+// ids count up from the highest ever issued (never reused). Returns { content, grant } or null.
+export function issueGrant(content, { actions, scope, mode = 'once', reason = '', date }) {
+  if (!Array.isArray(actions) || actions.length === 0) return null
+  const acts = [...new Set(actions)]
+  if (acts.some(a => !GRANT_ACTIONS.includes(a))) return null
+  if (!GRANT_MODES.includes(mode)) return null
+  const md = parseMetadata(content)
+  if (!parseScope(scope, md.phases)) return null
+  const rt = md.runtime
+  const max = rt.grants.reduce((n, g) => Math.max(n, parseInt((g.id.match(/^G-(\d+)$/) || [])[1] || '0', 10)), 0)
+  const grant = { ...emptyGrant(`G-${String(max + 1).padStart(3, '0')}`), actions: acts, scope, mode, issued: date, reason: reason || '' }
+  rt.grants.push(grant)
+  grantLog(rt, date, grant.id, 'ISSUED', `${acts.join(',')} @ ${scope} ${mode}`)
+  return { content: writeRuntime(content, rt), grant: { ...grant } }
+}
+
+// Revoke one active grant by id, or every active grant. Returns { content, revoked: ids }
+// or null when a named grant is unknown or not active (never a silent no-op).
+export function revokeGrants(content, { id, all = false, reason = '', date }) {
+  const rt = parseMetadata(content).runtime
+  let targets
+  if (all) targets = rt.grants.filter(g => g.status === 'active')
+  else {
+    const g = rt.grants.find(x => x.id === id)
+    if (!g || g.status !== 'active') return null
+    targets = [g]
+  }
+  for (const g of targets) {
+    g.status = 'revoked'
+    g.revoked = date
+    grantLog(rt, date, g.id, 'REVOKED', reason)
+  }
+  return { content: writeRuntime(content, rt), revoked: targets.map(g => g.id) }
+}
+
+// Spend one action of an active grant. A `once` grant is consumed when every action it
+// carries has been used once; a `standing` grant stays active (each use is still logged).
+// Returns { content, grant } or null when the grant is missing, inactive, does not carry
+// the action, or (once) already spent it.
+export function consumeGrant(content, { id, action, date }) {
+  const rt = parseMetadata(content).runtime
+  const g = rt.grants.find(x => x.id === id)
+  if (!g || g.status !== 'active' || !g.actions.includes(action)) return null
+  if (g.mode === 'once' && g.used.includes(action)) return null
+  g.used.push(action)
+  grantLog(rt, date, g.id, 'USED', action)
+  if (g.mode === 'once' && g.actions.every(a => g.used.includes(a))) {
+    g.status = 'consumed'
+    g.consumed = date
+  }
+  return { content: writeRuntime(content, rt), grant: { ...g, used: [...g.used] } }
+}
+
+// The newest gate verdict in the log — for one phase, or overall. Grant events in the
+// log are not verdicts and are skipped.
+export function latestVerdict(gateLog, phase) {
+  for (let i = gateLog.length - 1; i >= 0; i--) {
+    const m = gateLog[i].match(/^\S+ (\w+) [\w-]+ (PASS|FAIL|WAIVED)(?:\s|$)/)
+    if (!m || !PHASES.includes(m[1])) continue
+    if (phase === undefined || m[1] === phase) return m[2]
+  }
+  return null
+}
+
+// Why a grant's evidence binding does not hold right now (null when it holds): the work
+// the grant covers must have passed its gate — a PASS or WAIVED verdict, never FAIL or none.
+function bindingGap(md, grant) {
+  const sc = parseScope(grant.scope, md.phases)
+  if (!sc) return `scope "${grant.scope}" cannot be resolved against this metadata`
+  const log = md.runtime.gateLog
+  const check = (verdict, what) => {
+    if (!verdict) return `no gate verdict recorded for ${what} yet`
+    if (verdict === 'FAIL') return `${what}'s latest gate verdict is FAIL, not PASS`
+    return null
+  }
+  if (sc.kind === 'cycle') return check(latestVerdict(log), 'the current phase')
+  if (sc.kind === 'task') {
+    const active = md.runtime.activePlan
+    if (active !== sc.plan) return `active plan is ${active || 'none'}, grant covers ${sc.plan}`
+    return check(latestVerdict(log, 'develop'), 'develop')
+  }
+  return check(latestVerdict(log, sc.phase), sc.phase)
+}
+
+// The guard's question: may `action` run right now, and under which grant? Returns
+// { grant, reason: null } for the first active grant that carries the action and whose
+// binding holds, else { grant: null, reason } naming what is missing.
+export function matchGrant(md, action) {
+  const carrying = md.runtime.grants.filter(g =>
+    g.status === 'active' && g.actions.includes(action) && !(g.mode === 'once' && g.used.includes(action)))
+  if (!carrying.length) return { grant: null, reason: `no active grant carries "${action}"` }
+  const gaps = []
+  for (const g of carrying) {
+    const gap = bindingGap(md, g)
+    if (!gap) return { grant: { ...g, used: [...g.used] }, reason: null }
+    gaps.push(`${g.id} (${g.scope}): ${gap}`)
+  }
+  return { grant: null, reason: gaps.join('; ') }
+}
+
+// Route-back invalidation: reopening a phase revokes the grants that covered it — the
+// phase itself, its steps, its tasks (develop only), and any cycle-wide grant. The work
+// changed; the human re-authorizes.
+function revokeForReopen(content, phase, date) {
+  const rt = parseMetadata(content).runtime
+  const hit = rt.grants.filter(g => {
+    if (g.status !== 'active') return false
+    if (g.scope === 'cycle') return true
+    if (g.scope === `phase:${phase}`) return true
+    if (g.scope.startsWith(`step:${phase}/`)) return true
+    if (g.scope.startsWith('task:')) return phase === 'develop'
+    return false
+  })
+  for (const g of hit) {
+    g.status = 'revoked'
+    g.revoked = date
+    grantLog(rt, date, g.id, 'REVOKED', `reopen ${phase}`)
+  }
+  return hit.length ? writeRuntime(content, rt) : content
+}
+
+// A new cycle starts un-authorized: every remaining active grant expires.
+function expireGrants(content, date) {
+  const rt = parseMetadata(content).runtime
+  const hit = rt.grants.filter(g => g.status === 'active')
+  for (const g of hit) {
+    g.status = 'expired'
+    grantLog(rt, date, g.id, 'EXPIRED', 'cycle')
+  }
+  return hit.length ? writeRuntime(content, rt) : content
 }
 
 // Deterministically point runtime.active_plan at the plan the current develop run follows.
@@ -453,7 +661,7 @@ export function resetLoop(content, phase) {
 // rework. The phase's evidence attestation is cleared — the completion it attested no
 // longer stands (the gate-log FAIL recorded just before the route-back is the audit
 // trail). Returns null on an unknown/missing phase or agent (no silent no-op).
-export function reopenPhase(content, { phase, agents = [] }) {
+export function reopenPhase(content, { phase, agents = [], date = new Date().toISOString().slice(0, 10) }) {
   if (!PHASES.includes(phase)) return null
   const ph = parseMetadata(content).phases[phase]
   if (!ph) return null
@@ -465,7 +673,8 @@ export function reopenPhase(content, { phase, agents = [] }) {
   for (let i = range[0]; i < range[1]; i++) {
     if (/^ {6}status:/.test(lines[i])) {
       lines[i] = lines[i].replace(/status:\s*"?[^"]*"?\s*$/, 'status: "in_progress"')
-      return lines.join('\n')
+      // the grants that covered this phase no longer stand — the work is changing
+      return revokeForReopen(lines.join('\n'), phase, date)
     }
   }
   return null
@@ -570,7 +779,8 @@ export function recordCycle(content, { assessment, nextCycle, scope, reason, dat
     if (CYCLE_RESETS[assessment].includes('develop')) { rt.clarifierRounds = {}; rt.activePlan = null }
     out = writeRuntime(out, rt)
   }
-  return out
+  // A cycle boundary ends every pre-authorization — the next cycle starts un-authorized.
+  return expireGrants(out, date)
 }
 
 // ── CLI entry ───────────────────────────────────────────────────
@@ -918,7 +1128,67 @@ function loopResetCmd(argv) {
   process.stdout.write(JSON.stringify({ ok: true, phase: opts.phase, strikes: 0 }, null, 2) + '\n')
 }
 
-const COMMANDS = ['detect', 'init', 'complete', 'config', 'brief', 'counts', 'plan-add', 'cycle', 'gate-log', 'plan-active', 'clarifier-round', 'loop-reset', 'reopen']
+const today = () => new Date().toISOString().slice(0, 10)
+
+// `grant --actions commit[,push[,tag]] --scope <scope> [--mode once|standing] [--reason R] [--date YYYY-MM-DD]`
+// Issues a git pre-authorization. Running this command is itself a permission ask in the
+// guard: the human approving THAT prompt is the gate; the covered git op will not prompt again.
+function grantCmd(argv) {
+  const opts = { mode: 'once', reason: '' }
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--actions') opts.actions = argv[++i]
+    else if (argv[i] === '--scope') opts.scope = argv[++i]
+    else if (argv[i] === '--mode') opts.mode = argv[++i]
+    else if (argv[i] === '--reason') opts.reason = argv[++i]
+    else if (argv[i] === '--date') opts.date = argv[++i]
+  }
+  const actions = (opts.actions || '').split(',').map(s => s.trim()).filter(Boolean)
+  if (!actions.length || actions.some(a => !GRANT_ACTIONS.includes(a))) {
+    return cliFail(`--actions must be a comma list of: ${GRANT_ACTIONS.join(', ')} (publish is never grantable)`)
+  }
+  if (!opts.scope) return cliFail('--scope is required: cycle | phase:<phase> | step:<phase>/<agent> | task:<PLAN-id>')
+  if (!GRANT_MODES.includes(opts.mode)) return cliFail(`--mode must be one of: ${GRANT_MODES.join(', ')}`)
+  const date = opts.date || today()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return cliFail('--date must be YYYY-MM-DD')
+  const meta = readMetaOrFail()
+  if (!meta) return
+  const r = issueGrant(meta.content, { actions, scope: opts.scope, mode: opts.mode, reason: opts.reason, date })
+  if (!r) return cliFail(`invalid scope '${opts.scope}' — expected cycle | phase:<phase> | step:<phase>/<agent in that phase> | task:<PLAN-id>`)
+  writeFileSync(meta.metaPath, r.content)
+  process.stdout.write(JSON.stringify({ ok: true, grant: r.grant }, null, 2) + '\n')
+}
+
+// `grants` — list every grant, active first (the audit view; never writes).
+function grantsCmd() {
+  const meta = readMetaOrFail()
+  if (!meta) return
+  const all = parseMetadata(meta.content).runtime.grants
+  const grants = [...all.filter(g => g.status === 'active'), ...all.filter(g => g.status !== 'active')]
+  process.stdout.write(JSON.stringify({ ok: true, grants }, null, 2) + '\n')
+}
+
+// `revoke (--id G-NNN | --all) [--reason R] [--date YYYY-MM-DD]` — never prompted by the
+// guard: taking an authorization away is always free.
+function revokeCmd(argv) {
+  const opts = { reason: '' }
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--id') opts.id = argv[++i]
+    else if (argv[i] === '--all') opts.all = true
+    else if (argv[i] === '--reason') opts.reason = argv[++i]
+    else if (argv[i] === '--date') opts.date = argv[++i]
+  }
+  if (!opts.id && !opts.all) return cliFail('--id G-NNN or --all is required')
+  const date = opts.date || today()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return cliFail('--date must be YYYY-MM-DD')
+  const meta = readMetaOrFail()
+  if (!meta) return
+  const r = revokeGrants(meta.content, { id: opts.id, all: !!opts.all, reason: opts.reason, date })
+  if (!r) return cliFail(`grant '${opts.id}' is unknown or not active — nothing revoked`)
+  if (r.revoked.length) writeFileSync(meta.metaPath, r.content)
+  process.stdout.write(JSON.stringify({ ok: true, revoked: r.revoked }, null, 2) + '\n')
+}
+
+const COMMANDS = ['detect', 'init', 'complete', 'config', 'brief', 'counts', 'plan-add', 'cycle', 'gate-log', 'plan-active', 'clarifier-round', 'loop-reset', 'reopen', 'grant', 'grants', 'revoke']
 
 function main() {
   const cmd = process.argv[2]
@@ -936,6 +1206,9 @@ function main() {
   else if (cmd === 'clarifier-round') clarifierRoundCmd(rest)
   else if (cmd === 'loop-reset') loopResetCmd(rest)
   else if (cmd === 'reopen') reopenCmd(rest)
+  else if (cmd === 'grant') grantCmd(rest)
+  else if (cmd === 'grants') grantsCmd()
+  else if (cmd === 'revoke') revokeCmd(rest)
   else cliFail(`unknown command '${cmd}' — expected one of: ${COMMANDS.join(', ')}`)
 }
 
